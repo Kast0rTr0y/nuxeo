@@ -1,5 +1,5 @@
 /*
- * (C) Copyright 2016 Nuxeo SA (http://nuxeo.com/) and others.
+ * (C) Copyright 2016 Nuxeo (http://nuxeo.com/) and others.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,14 +20,21 @@ package org.nuxeo.ecm.restapi.server.jaxrs;
 
 import com.google.api.client.auth.oauth2.Credential;
 import org.codehaus.jackson.map.ObjectMapper;
+import org.codehaus.jackson.type.TypeReference;
 
 import javax.servlet.http.HttpServletResponse;
+import javax.ws.rs.Consumes;
+import javax.ws.rs.DELETE;
+import javax.ws.rs.POST;
+import javax.ws.rs.PUT;
+import javax.ws.rs.core.Response;
 import javax.ws.rs.core.Response.Status;
 import javax.ws.rs.core.Response.StatusType;
 
 import org.nuxeo.ecm.automation.server.jaxrs.RestOperationException;
 import org.nuxeo.ecm.core.api.DocumentModel;
 import org.nuxeo.ecm.core.api.NuxeoException;
+import org.nuxeo.ecm.core.api.NuxeoPrincipal;
 import org.nuxeo.ecm.platform.oauth2.providers.AbstractOAuth2UserEmailProvider;
 import org.nuxeo.ecm.platform.oauth2.providers.NuxeoOAuth2ServiceProvider;
 import org.nuxeo.ecm.platform.oauth2.providers.OAuth2ServiceProvider;
@@ -44,12 +51,12 @@ import javax.ws.rs.Path;
 import javax.ws.rs.PathParam;
 import javax.ws.rs.core.Context;
 import javax.ws.rs.core.MediaType;
-import javax.ws.rs.core.Response;
 import java.io.IOException;
 import java.io.Serializable;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 /**
  * Endpoint to retrieve OAuth2 authentication data
@@ -58,6 +65,19 @@ import java.util.Map;
 @WebObject(type = "oauth2")
 public class OAuth2Object extends AbstractResource<ResourceTypeImpl> {
 
+    private static final String APPLICATION_JSON_NXENTITY = "application/json+nxentity";
+
+    /**
+     * Lists all oauth2 service providers.
+     *
+     * @since 9.1
+     */
+    @GET
+    @Path("provider")
+    public List<NuxeoOAuth2ServiceProvider> getProviders(@Context HttpServletRequest request) throws IOException, RestOperationException {
+        return getProviders();
+    }
+
     /**
      * Retrieves oauth2 data for a given provider.
      */
@@ -65,23 +85,77 @@ public class OAuth2Object extends AbstractResource<ResourceTypeImpl> {
     @Path("provider/{providerId}")
     public Response getProvider(@PathParam("providerId") String providerId,
                                 @Context HttpServletRequest request) throws IOException, RestOperationException {
+        return Response.ok(getProvider(providerId)).build();
+    }
 
-        NuxeoOAuth2ServiceProvider provider = getProvider(providerId);
+    /**
+     * Creates a new OAuth2 service provider.
+     *
+     * @since 9.1
+     */
+    @POST
+    @Path("provider")
+    @Consumes({ APPLICATION_JSON_NXENTITY, "application/json" })
+    public Response addProvider(@Context HttpServletRequest request, NuxeoOAuth2ServiceProvider provider)
+        throws IOException, RestOperationException {
+        if (!((NuxeoPrincipal)getContext().getCoreSession().getPrincipal()).isAdministrator()) {
+            return Response.status(Status.FORBIDDEN).build();
+        }
+        Framework.doPrivileged(() -> {
+            OAuth2ServiceProviderRegistry registry = Framework.getService(OAuth2ServiceProviderRegistry.class);
+            registry.addProvider(provider.getServiceName(),
+                provider.getDescription(),
+                provider.getTokenServerURL(),
+                provider.getAuthorizationServerURL(),
+                provider.getUserAuthorizationURL(),
+                provider.getClientId(),
+                provider.getClientSecret(),
+                provider.getScopes(),
+                provider.isEnabled());
+        });
+        return Response.ok(getProvider(provider.getServiceName())).build();
+    }
 
-        Map<String,Object> result = new HashMap<>();
-        result.put("serviceName", provider.getServiceName());
-        result.put("isAvailable", provider.isProviderAvailable());
-        result.put("clientId", provider.getClientId());
-        result.put("authorizationURL", provider.getClientId() == null ? null : provider.getAuthorizationUrl(request));
+    /**
+     * Updates an OAuth2 service provider.
+     *
+     * @since 9.1
+     */
+    @PUT
+    @Path("provider/{providerId}")
+    @Consumes({ APPLICATION_JSON_NXENTITY, "application/json" })
+    public Response updateProvider(@PathParam("providerId") String providerId,
+                                   @Context HttpServletRequest request, NuxeoOAuth2ServiceProvider provider)
+        throws IOException, RestOperationException {
+        if (!((NuxeoPrincipal)getContext().getCoreSession().getPrincipal()).isAdministrator()) {
+            return Response.status(Status.FORBIDDEN).build();
+        }
+        getProvider(providerId);
+        Framework.doPrivileged(() -> {
+            OAuth2ServiceProviderRegistry registry = Framework.getService(OAuth2ServiceProviderRegistry.class);
+            registry.updateProvider(providerId, provider);
+        });
+        return Response.ok(getProvider(provider.getServiceName())).build();
+    }
 
-        String username = request.getUserPrincipal().getName();
-        NuxeoOAuth2Token token = getToken(provider, username);
-        boolean isAuthorized = (token != null);
-        String login = isAuthorized ? token.getServiceLogin() : null;
-        result.put("isAuthorized", isAuthorized);
-        result.put("userId", login);
-
-        return buildResponse(Status.OK, result);
+    /**
+     * Deletes an OAuth2 service provider.
+     *
+     * @since 9.1
+     */
+    @DELETE
+    @Path("provider/{providerId}")
+    public Response deleteProvider(@PathParam("providerId") String providerId, @Context HttpServletRequest request)
+        throws IOException, RestOperationException {
+        if (!((NuxeoPrincipal)getContext().getCoreSession().getPrincipal()).isAdministrator()) {
+            return Response.status(Status.FORBIDDEN).build();
+        }
+        getProvider(providerId);
+        Framework.doPrivileged(() -> {
+            OAuth2ServiceProviderRegistry registry = Framework.getService(OAuth2ServiceProviderRegistry.class);
+            registry.deleteProvider(providerId);
+        });
+        return Response.noContent().build();
     }
 
     /**
@@ -111,7 +185,21 @@ public class OAuth2Object extends AbstractResource<ResourceTypeImpl> {
         }
         Map<String,Object> result = new HashMap<>();
         result.put("token", credential.getAccessToken());
+        // TODO: make marshallers for Credentials and use Response.ok(result).build() instead
         return buildResponse(Status.OK, result);
+    }
+
+    private List<NuxeoOAuth2ServiceProvider> getProviders() {
+        OAuth2ServiceProviderRegistry registry = Framework.getService(OAuth2ServiceProviderRegistry.class);
+        return registry.getProviders().stream()
+            .filter(provider -> provider instanceof NuxeoOAuth2ServiceProvider)
+            .map(provider -> (NuxeoOAuth2ServiceProvider)provider)
+            .collect(Collectors.toList());
+    }
+
+    private List<NuxeoOAuth2Token> getTokens(String nxuser) {
+        // TODO: maybe avoid using the getProviders and access the directories instead
+        return getProviders().stream().map(provider -> getToken(provider, nxuser)).collect(Collectors.toList());
     }
 
     private NuxeoOAuth2Token getToken(NuxeoOAuth2ServiceProvider provider, String nxuser) {
@@ -141,7 +229,7 @@ public class OAuth2Object extends AbstractResource<ResourceTypeImpl> {
             .getProvider(providerId);
         if (provider == null || !(provider instanceof NuxeoOAuth2ServiceProvider)) {
             RestOperationException err = new RestOperationException("Invalid provider: " + providerId);
-            err.setStatus(HttpServletResponse.SC_BAD_REQUEST);
+            err.setStatus(HttpServletResponse.SC_NOT_FOUND);
             throw err;
         }
         return (NuxeoOAuth2ServiceProvider) provider;
@@ -156,6 +244,12 @@ public class OAuth2Object extends AbstractResource<ResourceTypeImpl> {
             .type(MediaType.APPLICATION_JSON + "; charset=UTF-8")
             .entity(message)
             .build();
+    }
+
+    private Map<String,Object> parseResponse(String json) throws IOException {
+        ObjectMapper mapper = new ObjectMapper();
+        TypeReference<HashMap<String,Object>> typeRef = new TypeReference<HashMap<String,Object>>() {};
+        return mapper.readValue(json, typeRef);
     }
 
 }
